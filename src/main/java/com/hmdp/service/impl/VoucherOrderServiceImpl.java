@@ -12,6 +12,9 @@ import com.hmdp.utils.RedisIdWorker;
 import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
+import org.redisson.client.RedisClient;
 import org.springframework.aop.framework.AopContext;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -41,6 +44,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
+    @Resource
+    private RedissonClient redissonClient;
+
     /**
      * 优惠券秒杀下单
      *
@@ -69,9 +75,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         Long userId = UserHolder.getUser().getId();
 
         //创建锁对象(新增代码)
-        SimpleRedisLock lock = new SimpleRedisLock("order:"+userId, stringRedisTemplate);
+        //SimpleRedisLock lock = new SimpleRedisLock("order:"+userId, stringRedisTemplate);
+        RLock lock = redissonClient.getLock("lock:order:" + userId);
         //获取锁
-        boolean isLock = lock.tryLock(1200);
+        boolean isLock = lock.tryLock();
         //判断是否获取锁成功
         if(!isLock){
             return Result.fail("一个人只允许下一单!!");
@@ -82,7 +89,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return proxy.createVoucherOrder(voucherId);
         } finally {
             //释放锁
-            lock.unLock();
+            lock.unlock();
         }
     }
 
