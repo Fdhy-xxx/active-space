@@ -17,6 +17,8 @@ import java.util.List;
  */
 public interface IBlogService extends IService<Blog> {
 
+    Result saveBlog(Blog blog);
+
     Result queryHotBlog(Integer current);
 
     Result queryBlogById(Long id);
@@ -34,4 +36,12 @@ public interface IBlogService extends IService<Blog> {
      * @return
      */
     Result queryBlogLikes(Long id);
+
+    /**
+     * 关注推送页面的笔记分页
+     * @param max
+     * @param offset
+     * @return
+     */
+    Result queryBlogOfFollow(Long max, Integer offset);
 }
