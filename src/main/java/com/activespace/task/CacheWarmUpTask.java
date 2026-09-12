@@ -5,6 +5,7 @@ import com.activespace.service.IShopService;
 import com.activespace.utils.CacheClient;
 import com.activespace.utils.RedisConstants;
 import lombok.extern.slf4j.Slf4j;
+import org.redisson.api.RBloomFilter;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -54,6 +55,9 @@ public class CacheWarmUpTask {
     @Resource
     private RedissonClient redissonClient;
 
+    @Resource
+    private RBloomFilter<Long> shopBloomFilter;
+
     /**
      * 预热热点场馆缓存
      */
@@ -84,6 +88,10 @@ public class CacheWarmUpTask {
                     .list();
 
             for (Shop shop : hotShops) {
+                // 同步写入布隆过滤器：既有数据在应用重启后需要重新灌入，
+                // 否则新查询会被布隆过滤器误拦（假阴性）
+                shopBloomFilter.add(shop.getId());
+
                 cacheClient.setWithLogicalExpire(
                         RedisConstants.CACHE_SHOP_KEY + shop.getId(),
                         shop,

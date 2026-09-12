@@ -12,6 +12,7 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.activespace.utils.CacheClient;
 import com.activespace.utils.RedisConstants;
 import com.activespace.utils.RedisData;
+import org.redisson.api.RBloomFilter;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -42,6 +43,9 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     @Resource
     private CacheClient cacheClient;
 
+    @Resource
+    private RBloomFilter<Long> shopBloomFilter;
+
     /**
      * 根据id查询商铺信息
      *
@@ -49,6 +53,11 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
      * @return
      */
     public Result queryById(Long id) {
+        // 布隆过滤器前置拦截：一定不存在的 id 直接返回，请求不会落到缓存与数据库
+        if (!shopBloomFilter.contains(id)) {
+            return Result.fail("店铺不存在");
+        }
+
         //缓存穿透
         //Shop shop = queryWithPassThrough(id);
         //Shop shop = cacheClient
@@ -67,6 +76,19 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             return Result.fail("店铺不存在");
         }
         return Result.ok(shop);
+    }
+
+    /**
+     * 新增商铺：落库成功后同步写入布隆过滤器
+     * 必须同步 add，否则新场馆会被布隆过滤器拦下（假阴性）
+     */
+    @Override
+    public boolean save(Shop shop) {
+        boolean saved = super.save(shop);
+        if (saved && shop.getId() != null) {
+            shopBloomFilter.add(shop.getId());
+        }
+        return saved;
     }
 
     /**
@@ -283,6 +305,8 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         }
         //更新数据库
         updateById(shop);
+        //同步到布隆过滤器（add 本身是幂等的，重复写入无副作用）
+        shopBloomFilter.add(id);
         //删除缓存
         String key = RedisConstants.CACHE_SHOP_KEY + shop.getId();
         stringRedisTemplate.delete(key);
