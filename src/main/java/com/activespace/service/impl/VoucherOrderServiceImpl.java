@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * <p>
@@ -52,6 +53,15 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Resource
     private RedissonClient redissonClient;
+
+    /** 下单锁 key 前缀（按用户维度加锁，用于防止同一用户并发重复下单） */
+    private static final String LOCK_ORDER_KEY = "lock:order:";
+
+    /** 下单锁最大等待时间（秒） */
+    private static final long ORDER_LOCK_WAIT_SECONDS = 3L;
+
+    /** pending-list 最大重试次数，防止异常消息导致无限重试 */
+    private static final int MAX_PENDING_RETRY = 5;
 
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
     static {
@@ -108,7 +118,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     }
 
     private void handlePendingList() {
-        while (true) {
+        // 增加重试上限：消息未 ACK 时 pending-list 不会清空，原 while(true) 存在无限重试风险
+        int attempt = 0;
+        while (attempt < MAX_PENDING_RETRY) {
             try {
                 // 1.获取pending-list中的订单信息 XREADGROUP GROUP g1 c1 COUNT 1  STREAMS s1 0
                 List<MapRecord<String, Object, Object>> list = stringRedisTemplate.opsForStream().read(
@@ -129,13 +141,19 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 // 4.确认消息 XACK
                 stringRedisTemplate.opsForStream().acknowledge("stream.orders","g1",record.getId());
             } catch (Exception e) {
-                log.error("处理pending-list订单中的异常", e);
+                attempt++;
+                log.error("处理pending-list订单中的异常，已重试 {} 次", attempt, e);
                 try {
                     Thread.sleep(20);
                 } catch (InterruptedException ex) {
-                    ex.printStackTrace();
+                    Thread.currentThread().interrupt();
+                    break;
                 }
             }
+        }
+        if (attempt >= MAX_PENDING_RETRY) {
+            log.error("pending-list 重试已达上限 {} 次，仍有消息未确认，请人工检查 stream.orders",
+                    MAX_PENDING_RETRY);
         }
     }
 
@@ -165,22 +183,31 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private void handleVoucherOrder(VoucherOrder voucherOrder) {
         //1.获取用户
         Long userId = voucherOrder.getUserId();
-        // 2.创建锁对象
-        RLock redisLock = redissonClient.getLock("lock:order:" + userId);
-        // 3.尝试获取锁
-        boolean isLock = redisLock.tryLock();
+        // 2.创建锁对象（按用户粒度加锁，防止同一用户并发重复下单）
+        RLock redisLock = redissonClient.getLock(LOCK_ORDER_KEY + userId);
+        // 3.尝试获取锁：最多等待 ORDER_LOCK_WAIT_SECONDS 秒
+        boolean isLock;
+        try {
+            isLock = redisLock.tryLock(ORDER_LOCK_WAIT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("获取下单锁被中断, userId=" + userId, e);
+        }
         // 4.判断是否获得锁成功
         if (!isLock) {
-            // 获取锁失败，直接返回失败或者重试
-            log.error("不允许重复下单！");
-            return;
+            // 【重要】这里必须抛出异常，不能直接 return：
+            // 直接 return 会让消费者正常返回、消息被 ACK，导致这一单被静默丢弃（Redis 库存已扣、订单未生成）；
+            // 抛出异常则不会执行 acknowledge，消息保留在 pending-list 中由 handlePendingList() 重试。
+            throw new RuntimeException("获取下单锁失败，等待重试, userId=" + userId);
         }
         try {
             //注意：由于是spring的事务是放在threadLocal中，此时的是多线程，事务会失效
             proxy.createVoucherOrder(voucherOrder);
         } finally {
-            // 释放锁
-            redisLock.unlock();
+            // 释放锁：仅在当前线程持有锁时释放，避免误删其他线程的锁
+            if (redisLock.isHeldByCurrentThread()) {
+                redisLock.unlock();
+            }
         }
     }
 
