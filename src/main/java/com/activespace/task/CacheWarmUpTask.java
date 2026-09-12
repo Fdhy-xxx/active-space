@@ -40,8 +40,11 @@ public class CacheWarmUpTask {
     /** 预热任务持锁的最长时间（秒），防止任务异常时锁无法释放 */
     private static final long LOCK_LEASE_SECONDS = 10L;
 
-    /** 预热任务启动延迟（毫秒），避开应用启动时的资源竞争 */
-    private static final long INITIAL_DELAY_MS = 30 * 1000L;
+    /**
+     * 预热任务启动延迟（毫秒）：0 表示应用启动后立即执行一次，
+     * 保证布隆过滤器与缓存尽早完成初始化，避免启动初期出现查询空窗
+     */
+    private static final long INITIAL_DELAY_MS = 0L;
 
     /** 预热任务执行间隔（毫秒） */
     private static final long FIXED_DELAY_MS = 10 * 60 * 1000L;

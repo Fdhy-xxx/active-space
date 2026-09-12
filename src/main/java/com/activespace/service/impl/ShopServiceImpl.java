@@ -63,7 +63,9 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
      */
     public Result queryById(Long id) {
         // 布隆过滤器前置拦截：一定不存在的 id 直接返回，请求不会落到缓存与数据库
-        if (!shopBloomFilter.contains(id)) {
+        // 注意：必须判断 count() > 0。应用刚启动时过滤器可能还没被预热任务灌入数据，
+        // 此时若直接拦截会导致全部查询误判为「店铺不存在」
+        if (shopBloomFilter.count() > 0 && !shopBloomFilter.contains(id)) {
             return Result.fail("店铺不存在");
         }
 
