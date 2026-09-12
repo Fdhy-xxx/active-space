@@ -116,10 +116,9 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             Shop shop = JSONUtil.toBean(shopJson, Shop.class);
             return shop;
         }
-        //判断命中的是否是空值
-        if (shopJson.equals("")) { // ==> (shopJson == "")
+        //判断命中的是否是空值（注意：这里必须判空，否则 shopJson 为 null 时会抛 NPE）
+        if (shopJson != null) {
             return null;
-            //return Result.fail("店铺不存在");
         }
         //不存在，根据id查询数据库
         Shop shop = getById(id);
@@ -311,7 +310,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         //删除缓存
         String key = RedisConstants.CACHE_SHOP_KEY + shop.getId();
         stringRedisTemplate.delete(key);
-        return null;
+        return Result.ok();
     }
 
 
