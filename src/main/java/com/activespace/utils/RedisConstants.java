@@ -10,6 +10,11 @@ public class RedisConstants {
 
     public static final Long CACHE_SHOP_TTL = 30L;
     public static final String CACHE_SHOP_KEY = "cache:shop:";
+    /** 场馆缓存的逻辑过期时间（秒）。查询链路与预热任务共用，避免两处配置不一致 */
+    public static final Long CACHE_SHOP_LOGICAL_EXPIRE = 20L;
+
+    /** 缓存预热任务的分布式锁 key */
+    public static final String LOCK_CACHE_WARMUP_KEY = "lock:cache:warmup:shop";
 
     public static final String FOLLOW_KEY = "follows:";
 
