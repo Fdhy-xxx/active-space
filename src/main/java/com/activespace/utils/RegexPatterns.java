@@ -1,7 +1,7 @@
 package com.activespace.utils;
 
 /**
- * @author 虎哥
+ * @author 郑新跃
  */
 public abstract class RegexPatterns {
     /**

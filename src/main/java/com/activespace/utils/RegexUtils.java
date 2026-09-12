@@ -3,7 +3,7 @@ package com.activespace.utils;
 import cn.hutool.core.util.StrUtil;
 
 /**
- * @author 虎哥
+ * @author 郑新跃
  */
 public class RegexUtils {
     /**
