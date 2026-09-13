@@ -14,7 +14,7 @@
 ![Redis](https://img.shields.io/badge/Redis-7.0-DC382D)
 ![MyBatis-Plus](https://img.shields.io/badge/MyBatis--Plus-3.4.3-blue)
 ![Redisson](https://img.shields.io/badge/Redisson-3.13.6-8A2BE2)
-![JMeter](https://img.shields.io/badge/压测-JMeter-D22128)
+![JMeter](https://img.shields.io/badge/测试-JMeter-D22128)
 
 </div>
 
@@ -30,7 +30,7 @@
   - [亮点二:Redis + Lua 原子秒杀与异步下单](#-亮点二redis--lua-原子秒杀与异步下单)
   - [亮点三:用 Redis 数据结构驱动业务](#-亮点三用-redis-数据结构驱动业务)
 - [Redis Key 设计](#-redis-key-设计)
-- [性能表现](#-性能表现)
+- [验证与测试](#-验证与测试)
 - [快速开始](#-快速开始)
 - [项目结构](#-项目结构)
 
@@ -107,10 +107,11 @@ graph TB
 
 | 问题 | 方案 | 实现要点 | 代码位置 |
 | --- | --- | --- | --- |
-| **缓存穿透** | 缓存空值 | 查无数据时写入空值(2min TTL)，拦截对不存在 Key 的重复打库 | [ShopServiceImpl](src/main/java/com/activespace/service/impl/ShopServiceImpl.java#L77) |
-| **缓存击穿** | 互斥锁 + **双重检查** | `SETNX` 抢锁，抢到后**二次读缓存**再回源 DB，重建完释放 | [CacheClient](src/main/java/com/activespace/utils/CacheClient.java#L127) |
-| **缓存击穿** | 逻辑过期 + **异步重建** | 热点数据不物理过期，过期后**单线程池异步重建**，请求先返回旧数据 | [CacheClient](src/main/java/com/activespace/utils/CacheClient.java#L75) |
-| **缓存雪崩** | 差异化 TTL | 不同业务配置不同过期时间，避免同时失效 | [RedisConstants](src/main/java/com/activespace/utils/RedisConstants.java) |
+| **缓存穿透** | **布隆过滤器** + 缓存空值 | 查询入口先用布隆过滤器拦截「一定不存在」的 ID,不再落到缓存与数据库;未命中时写入空值(2min TTL)兜底 | [BloomFilterConfig](src/main/java/com/activespace/config/BloomFilterConfig.java) / [ShopServiceImpl](src/main/java/com/activespace/service/impl/ShopServiceImpl.java#L77) |
+| **缓存击穿** | **Redisson 互斥锁** + 双重检查 | `tryLock` 限时等待,抢到锁后**二次读缓存**再回源 DB,释放前校验持有者身份 | [CacheClient](src/main/java/com/activespace/utils/CacheClient.java#L127) |
+| **缓存击穿** | 逻辑过期 + **异步重建** | 热点数据不物理过期,过期后提交**独立线程池异步重建**,其余请求立即返回旧数据(降级) | [CacheClient](src/main/java/com/activespace/utils/CacheClient.java#L75) |
+| **缓存雪崩** | 差异化 TTL + **随机抖动** | 不同业务配置不同过期时间,并在物理 TTL 上附加随机抖动,避免批量 Key 同时失效 | [RedisConstants](src/main/java/com/activespace/utils/RedisConstants.java) / [CacheClient](src/main/java/com/activespace/utils/CacheClient.java) |
+| **冷启动** | **定时预热** + 分布式锁 | 定时预热 TopN 热点场馆并同步写入布隆过滤器;多实例部署时用 Redisson 锁保证只有一个实例执行 | [CacheWarmUpTask](src/main/java/com/activespace/task/CacheWarmUpTask.java) |
 
 > 💡 **逻辑过期为何更优**:互斥锁方案在重建瞬间仍会阻塞请求；逻辑过期方案让**所有请求都立即返回旧数据**，重建在独立线程池中完成，用户几乎无感知。这是典型的「冷热数据隔离」——热点数据常驻缓存，用「逻辑时间」代替「物理过期」。
 
@@ -173,7 +174,8 @@ sequenceDiagram
 
 **方案三 · Redisson 分布式锁兜底** —— 异步 Worker 中按用户粒度加锁，解决**集群环境下 JVM 锁失效**的问题，同时配合数据库 `stock > 0` 条件更新做最终兜底。
 
-> 📈 **压测结果**:JMeter 并发压测下单机峰值 **QPS 600+**，库存 **0 超卖**，重复下单全部被拦截。
+> ✅ **正确性验证**:并发发起预约后核对「订单数 + 剩余库存 = 初始库存」，两者一致，无超卖；重复下单与库存不足均由 Lua 脚本在入口拦截。
+> （本项目未做正式压测，QPS 等性能数字不在此提供，原因见下方「验证与测试」章节。）
 
 ### 💡 亮点三:用 Redis 数据结构驱动业务
 
@@ -196,7 +198,9 @@ sequenceDiagram
 | `login:code:{phone}` | String | 登录验证码 | 2 min |
 | `login:token:{token}` | String | 用户会话 | 30 min(访问自动续期) |
 | `cache:shop:{id}` | String(JSON) | 场馆缓存(逻辑过期) | 逻辑 20s |
-| `lock:shop:{id}` | String | 场馆重建互斥锁 | 10s |
+| `bloom:shop` | BitMap | 场馆布隆过滤器(预估 10 万元素 / 误判率 1%) | 持久,随数据量重建 |
+| `lock:shop:{id}` | Hash | 场馆重建互斥锁(Redisson RLock) | 10s |
+| `lock:cache:warmup:shop` | Hash | 缓存预热任务互斥锁(Redisson RLock) | 10s |
 | `seckill:stock:{vid}` | String | 秒杀库存 | 随活动 |
 | `seckill:order:{vid}` | Set | 已下单用户 | 随活动 |
 | `stream.orders` | Stream | 秒杀订单消息队列 | 持久 |
@@ -208,16 +212,21 @@ sequenceDiagram
 
 ---
 
-## 📊 性能表现
+## ✅ 验证与测试
 
-| 指标 | 优化前 | 优化后 |
+> 说明:本项目**未做正式并发压测**,因此不提供 QPS、平均响应时间等性能数字 ——
+> 单机同机部署时(应用、MySQL、Redis 共用同一份 CPU 与内存)测得的数据不具备参考性,
+> 写出来反而误导。以下是可以复现、可核对的功能与正确性验证:
+
+| 验证项 | 验证方法 | 结果 |
 | --- | --- | --- |
-| 核心查询接口响应 | ~800ms | **< 150ms** |
-| 缓存命中率 | — | **90%+** |
-| 秒杀下单单机峰值 | — | **QPS 600+** |
-| 秒杀超卖 | — | **0 超卖** |
+| 缓存穿透拦截 | 预热完成后,循环请求 100 个不存在的场馆 ID,观察控制台 SQL 输出 | 数据库查询 **0 次**(全部被布隆过滤器在入口拦截) |
+| 缓存预热 | 启动后查看预热日志与 `cache:shop:*` 键 | TopN 热点场馆全部写入,布隆过滤器同步初始化 |
+| 秒杀不超卖 | 并发发起预约,核对「订单数 + 剩余库存 = 初始库存」 | 两者一致,无超卖、无少卖 |
+| 丢单修复 | 模拟消费端异常,观察 Stream 的 pending-list | 消息保留在 pending-list 中重试,达重试上限后告警 |
 
-> 数据来源:JMeter 压测 + 接口实测。
+> 💡 如需自行压测:用 JMeter 做梯度加压找拐点,再用「订单数 + 剩余库存 = 初始库存」对账验证正确性。
+> 注意两点:并发数 ≠ QPS;压测机应与 MySQL/Redis 分开部署,否则测到的是本机资源上限,而不是服务能力。
 
 ---
 
